@@ -36,8 +36,7 @@ struct vhf_drvdata {
 
 
 /*
- * These report descriptors have been extracted from a Surface Book 2.
- * They seems to be similar enough to be usable on the Surface Laptop.
+ * These report descriptors have been extracted from a SL2 via Windows.
  */
 static const u8 vhf_hid_desc[] = {
 	// keyboard descriptor (event command ID 0x03)
@@ -84,6 +83,7 @@ static const u8 vhf_hid_desc[] = {
 	0xA1, 0x01,             /*  Collection (Application),               */
 	0x85, 0x03,             /*      Report ID (3),                      */
 	0x75, 0x10,             /*      Report Size (16),                   */
+	0x95, 0x01,             /*      Report Count (1),                   */
 	0x15, 0x00,             /*      Logical Minimum (0),                */
 	0x26, 0xFF, 0x03,       /*      Logical Maximum (1023),             */
 	0x19, 0x00,             /*      Usage Minimum (00h),                */
