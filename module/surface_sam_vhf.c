@@ -137,8 +137,8 @@ static int vhf_hid_output_report(struct hid_device *hid, u8 *buf, size_t len)
 		.iid = 0x00,
 		.pri = SURFACE_SAM_PRIORITY_HIGH,
 		.snc = 0x00,
-		.cdl = len,
-		.pld = buf,
+		.cdl = len - 1,
+		.pld = &buf[1],
 	};
 
 	status = surface_sam_ssh_rqst(&rqst, NULL);
