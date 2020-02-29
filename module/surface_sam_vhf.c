@@ -124,28 +124,55 @@ static int vhf_hid_raw_request(struct hid_device *hid, unsigned char reportnum,
 			       u8 *buf, size_t len, unsigned char rtype,
 			       int reqtype)
 {
-	hid_dbg(hid, "%s\n", __func__);
-	return 0;
-}
-
-static int vhf_hid_output_report(struct hid_device *hid, u8 *buf, size_t len)
-{
 	int status;
-	struct surface_sam_ssh_rqst rqst = {
-		.tc = SAM_EVENT_VHF_TC,
-		.cid = 0x01,
-		.iid = 0x00,
-		.pri = SURFACE_SAM_PRIORITY_HIGH,
-		.snc = 0x00,
-		.cdl = len - 1,
-		.pld = &buf[1],
-	};
+	u8 cid;
+	struct surface_sam_ssh_rqst rqst = {};
+	struct surface_sam_ssh_buf result = {};
 
-	status = surface_sam_ssh_rqst(&rqst, NULL);
-	if (status)
+	hid_dbg(hid, "%s: reportnum=%#04x rtype=%i reqtype=%i\n", __func__, reportnum, rtype, reqtype);
+	print_hex_dump_debug("report:", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
+
+	// Byte 0 is the report number. Report data starts at byte 1.
+	buf[0] = reportnum;
+
+	switch (rtype) {
+	case HID_OUTPUT_REPORT:
+		cid = 0x01;
+		break;
+	case HID_FEATURE_REPORT:
+		hid_err(hid, "%s: unsupported HID_FEATURE_REPORT req type 0x%02x\n", __func__, rtype);
+		return -EIO;
+	default:
+		hid_err(hid, "%s: unknown report type 0x%02x\n", __func__, reportnum);
+		return -EIO;
+	}
+
+	rqst.tc  = SAM_EVENT_VHF_TC;
+	rqst.pri = SURFACE_SAM_PRIORITY_HIGH;
+	rqst.iid = 0x00; // windows tends to distinguish iids, but EC will take it
+	rqst.cid = cid;
+	rqst.snc = HID_REQ_GET_REPORT == reqtype ? 0x01 : 0x00;
+	rqst.cdl = HID_REQ_GET_REPORT == reqtype ? 0x01 : len;
+	rqst.pld = buf;
+
+	result.cap = len;
+	result.len = 0;
+	result.data = buf;
+
+	hid_dbg(hid, "%s: sending to cid=%#04x snc=%#04x\n", __func__, cid, HID_REQ_GET_REPORT == reqtype);
+
+	status = surface_sam_ssh_rqst(&rqst, &result);
+	hid_dbg(hid, "%s: status %i\n", __func__, status);
+
+	if (status) {
 		return status;
+	}
 
-	return len;
+	if (result.len > 0) {
+		print_hex_dump_debug("response:", DUMP_PREFIX_OFFSET, 16, 1, result.data, result.len, false);
+	}
+
+	return result.len;
 }
 
 static struct hid_ll_driver vhf_hid_ll_driver = {
@@ -155,7 +182,6 @@ static struct hid_ll_driver vhf_hid_ll_driver = {
 	.close         = vhf_hid_close,
 	.parse         = vhf_hid_parse,
 	.raw_request   = vhf_hid_raw_request,
-	.output_report = vhf_hid_output_report,
 };
 
 
