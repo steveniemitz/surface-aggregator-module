@@ -23,14 +23,10 @@
 
 #define VHF_HID_STARTED		0
 
-struct sid_vhf_evtctx {
-	struct device     *dev;
-	struct hid_device *hid;
-	unsigned long flags;
-};
-
 struct sid_vhf_drvdata {
-	struct sid_vhf_evtctx event_ctx;
+	struct hid_device *hiddev;
+	unsigned long state;
+	u8 iid;
 };
 
 
@@ -51,7 +47,7 @@ static int sid_vhf_hid_open(struct hid_device *hid)
 
 	hid_dbg(hid, "%s\n", __func__);
 
-	set_bit(VHF_HID_STARTED, &drvdata->event_ctx.flags);
+	set_bit(VHF_HID_STARTED, &drvdata->state);
 	return 0;
 }
 
@@ -62,7 +58,7 @@ static void sid_vhf_hid_close(struct hid_device *hid)
 
 	hid_dbg(hid, "%s\n", __func__);
 
-	clear_bit(VHF_HID_STARTED, &drvdata->event_ctx.flags);
+	clear_bit(VHF_HID_STARTED, &drvdata->state);
 }
 
 struct surface_sam_sid_vhf_meta_rqst {
@@ -205,10 +201,11 @@ static int vhf_get_hid_descriptor(struct hid_device *hid, u8 iid, u8 **desc, int
 
 static int sid_vhf_hid_parse(struct hid_device *hid)
 {
+	struct sid_vhf_drvdata *drvdata = dev_get_drvdata(hid->dev.parent);
 	int ret = 0, size;
 	u8 *buf;
 
-	ret = vhf_get_hid_descriptor(hid, 0x00, &buf, &size);
+	ret = vhf_get_hid_descriptor(hid, drvdata->iid, &buf, &size);
 	if (ret != 0) {
 		hid_err(hid, "Failed to read HID descriptor from device: %d\n", ret);
 		return -EIO;
@@ -226,6 +223,7 @@ static int sid_vhf_hid_raw_request(struct hid_device *hid, unsigned char
 		reportnum, u8 *buf, size_t len, unsigned char rtype, int
 		reqtype)
 {
+	struct sid_vhf_drvdata *drvdata = dev_get_drvdata(hid->dev.parent);
 	int status;
 	u8 cid;
 	struct surface_sam_ssh_rqst rqst = {};
@@ -268,7 +266,7 @@ static int sid_vhf_hid_raw_request(struct hid_device *hid, unsigned char
 
 	rqst.tc  = SAM_EVENT_SID_VHF_TC;
 	rqst.pri = SURFACE_SAM_PRIORITY_HIGH;
-	rqst.iid = 0x00; // windows tends to distinguish iids, but EC will take it
+	rqst.iid = drvdata->iid;
 	rqst.cid = cid;
 	rqst.snc = reqtype == HID_REQ_GET_REPORT ? 0x01 : 0x00;
 	rqst.cdl = reqtype == HID_REQ_GET_REPORT ? 0x01 : len;
@@ -323,18 +321,28 @@ static struct hid_device *sid_vhf_create_hid_device(struct platform_device *pdev
 	return hid;
 }
 
+// FIXME: currently only once instance supported due to event handler
 static int sid_vhf_event_handler(struct surface_sam_ssh_event *event, void *data)
 {
-	struct sid_vhf_evtctx *ctx = (struct sid_vhf_evtctx *)data;
+	struct platform_device *pdev = data;
+	struct sid_vhf_drvdata *drvdata = platform_get_drvdata(pdev);
 
 	// skip if HID hasn't started yet
-	if (!test_bit(VHF_HID_STARTED, &ctx->flags))
+	if (!test_bit(VHF_HID_STARTED, &drvdata->state))
 		return 0;
 
-	if (event->tc == SAM_EVENT_SID_VHF_TC && (event->cid == 0x00 || event->cid == 0x03 || event->cid == 0x04))
-		return hid_input_report(ctx->hid, HID_INPUT_REPORT, event->pld, event->len, 1);
+	if (event->tc != SAM_EVENT_SID_VHF_TC) {
+		dev_warn(&pdev->dev, "unexpected target category: %d\n", event->tc);
+		return 0;
+	}
 
-	dev_warn(ctx->dev, "unsupported event (tc = %d, cid = %d)\n", event->tc, event->cid);
+	if (event->iid != drvdata->iid)
+		return 0;
+
+	if (event->cid == 0x00 || event->cid == 0x03 || event->cid == 0x04)
+		return hid_input_report(drvdata->hiddev, HID_INPUT_REPORT, event->pld, event->len, 1);
+
+	dev_warn(&pdev->dev, "unsupported event (tc = %d, cid = %d)\n", event->tc, event->cid);
 	return 0;
 }
 
@@ -343,6 +351,7 @@ static int surface_sam_sid_vhf_probe(struct platform_device *pdev)
 	struct sid_vhf_drvdata *drvdata;
 	struct vhf_device_metadata meta = {};
 	struct hid_device *hid;
+	u8 iid = pdev->id == PLATFORM_DEVID_NONE ? 0 : pdev->id;
 	int status;
 
 	// add device link to EC
@@ -354,7 +363,7 @@ static int surface_sam_sid_vhf_probe(struct platform_device *pdev)
 	if (!drvdata)
 		return -ENOMEM;
 
-	status = vhf_get_metadata(0x00, &meta);
+	status = vhf_get_metadata(iid, &meta);
 	if (status)
 		goto err_create_hid;
 
@@ -364,19 +373,19 @@ static int surface_sam_sid_vhf_probe(struct platform_device *pdev)
 		goto err_create_hid;
 	}
 
-	drvdata->event_ctx.dev = &pdev->dev;
-	drvdata->event_ctx.hid = hid;
+	drvdata->hiddev = hid;
+	drvdata->iid = iid;
 
 	platform_set_drvdata(pdev, drvdata);
 
 	status = surface_sam_ssh_set_event_handler(
 			SAM_EVENT_SID_VHF_RQID,
 			sid_vhf_event_handler,
-			&drvdata->event_ctx);
+			&pdev);
 	if (status)
 		goto err_event_handler;
 
-	status = surface_sam_ssh_enable_event_source(SAM_EVENT_SID_VHF_TC, 0x01, SAM_EVENT_SID_VHF_RQID);
+	status = surface_sam_ssh_enable_event_source(SAM_EVENT_SID_VHF_TC, 0x02, SAM_EVENT_SID_VHF_RQID);
 	if (status)
 		goto err_event_source;
 
@@ -387,7 +396,7 @@ static int surface_sam_sid_vhf_probe(struct platform_device *pdev)
 	return 0;
 
 err_add_hid:
-	surface_sam_ssh_disable_event_source(SAM_EVENT_SID_VHF_TC, 0x01, SAM_EVENT_SID_VHF_RQID);
+	surface_sam_ssh_disable_event_source(SAM_EVENT_SID_VHF_TC, 0x02, SAM_EVENT_SID_VHF_RQID);
 err_event_source:
 	surface_sam_ssh_remove_event_handler(SAM_EVENT_SID_VHF_RQID);
 err_event_handler:
@@ -402,10 +411,10 @@ static int surface_sam_sid_vhf_remove(struct platform_device *pdev)
 {
 	struct sid_vhf_drvdata *drvdata = platform_get_drvdata(pdev);
 
-	surface_sam_ssh_disable_event_source(SAM_EVENT_SID_VHF_TC, 0x01, SAM_EVENT_SID_VHF_RQID);
+	surface_sam_ssh_disable_event_source(SAM_EVENT_SID_VHF_TC, 0x02, SAM_EVENT_SID_VHF_RQID);
 	surface_sam_ssh_remove_event_handler(SAM_EVENT_SID_VHF_RQID);
 
-	hid_destroy_device(drvdata->event_ctx.hid);
+	hid_destroy_device(drvdata->hiddev);
 	kfree(drvdata);
 
 	platform_set_drvdata(pdev, NULL);
